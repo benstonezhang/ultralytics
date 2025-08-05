@@ -74,6 +74,8 @@ class Detect(nn.Module):
     strides = torch.empty(0)  # init
     legacy = False  # backward compatibility for v3/v5/v8/v9 models
     xyxy = False  # xyxy or xywh output
+    export_features = False # export features for ReID
+    export_skip_dfl = False # skip DFL when export model
 
     def __init__(self, nc: int = 80, ch: Tuple = ()):
         """
@@ -116,12 +118,30 @@ class Detect(nn.Module):
         if self.end2end:
             return self.forward_end2end(x)
 
+        if self.export:
+            if self.export_features:
+                s = min([f.shape[1] for f in x])  # find smallest vector length
+                # mean reduce all vectors to same length
+                obj_feats = torch.cat([f.permute(0, 2, 3, 1).reshape(f.shape[0], -1, s, f.shape[1] // s).mean(dim=-1)
+                                       for f in x], dim=1)
+            if self.export_skip_dfl:
+                y = []
+                for i in range(self.nl):
+                    y.append(self.cv2[i](x[i]))
+                    cls = torch.sigmoid(self.cv3[i](x[i]))
+                    cls_sum = torch.clamp(cls.sum(1, keepdim=True), 0, 1)
+                    y.append(cls)
+                    y.append(cls_sum)
+                if self.export_features:
+                    y.append(obj_feats)
+                return y
+
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         if self.training:  # Training path
             return x
         y = self._inference(x)
-        return y if self.export else (y, x)
+        return ((y, obj_feats) if self.export_features else y) if self.export else (y, x)
 
     def forward_end2end(self, x: List[torch.Tensor]) -> Union[dict, Tuple]:
         """
